@@ -6,6 +6,13 @@ import json
 
 #TODO Normalize number and Eng char
 
+pad_value = {
+            'input_ids':[5],
+            'attention_mask':[0],
+            'token_type_ids':[3],
+        }
+
+
 def json_parser(fname='./data/Train_qa_ans.json'):
     with open(fname) as f:
         f = f.read()    
@@ -45,8 +52,8 @@ class doc_preprocessing():
     def __init__(
             self, 
             tokenizer, 
-            stride=460,
-            max_seq_len=470,
+            stride=500,
+            max_seq_len=500,
             remove_stop_word=False,
         ) -> None:
         self.stride = stride
@@ -107,11 +114,6 @@ class doc_preprocessing():
 
 
     def pad_(self, texts):
-        pad_value = {
-            'input_ids':[5],
-            'attention_mask':[0],
-            'token_type_ids':[3],
-        }
         max_len = max([len(ele) for text in texts for ele in text['input_ids']])
         
         padded_value = [{
@@ -142,12 +144,16 @@ class doc_preprocessing():
         return docs, query
 
 
-def fragment_pad(*dcts):
+def collate_fn(dcts):
     combined_dict = {}
     for k in set(dcts[0]):
         if k in ['input_ids', 'attention_mask', 'token_type_ids']:
             combined_dict.update({
-                k:pad_sequence([d[k].squeeze(0) for d in dcts], batch_first=True)
+                k:pad_sequence(
+                    [d[k].squeeze(0) for d in dcts], 
+                    batch_first=True, 
+                    padding_value=pad_value[k][0]
+                )
             })
         else:
              combined_dict.update({
@@ -155,20 +161,24 @@ def fragment_pad(*dcts):
             })
         
     return combined_dict
-
-
-def collate_fn(batch):
-    batched_dict = fragment_pad(*batch)
-    return batched_dict
     
     
 class QA_Dataset(Dataset):
-    def __init__(self, tokenizer, fname, remove_stop_word=False):
+    def __init__(
+        self, 
+        tokenizer, 
+        fname, 
+        stride=500,
+        max_seq_len=500,
+        remove_stop_word=False
+        ):
         super().__init__()
         
         doc, q, choices, ans = json_parser(fname) 
         pipe = doc_preprocessing(
             tokenizer, 
+            stride=stride,
+            max_seq_len=max_seq_len,
             remove_stop_word=remove_stop_word
         )
         doc, query = pipe(doc, q, choices)

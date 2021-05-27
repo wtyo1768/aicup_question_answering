@@ -3,6 +3,7 @@ import numpy as np
 import json
 from sklearn.model_selection import KFold
 
+
 qa_raw = './data/Train_qa_ans.json'
 risk_raw = './data/Train_risk_classification_ans.csv'
 
@@ -23,7 +24,6 @@ def q2b(s):
 # How to split data for two dataset
 
 if __name__== '__main__':
-
     with open(qa_raw) as f:
         f = f.read()    
         qa_json_text = json.loads(f)
