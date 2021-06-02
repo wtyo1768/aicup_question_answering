@@ -13,7 +13,7 @@ pad_value = {
         }
 
 
-def json_parser(fname='./data/Train_qa_ans.json'):
+def json_parser(fname='./data/train_fold1.json'):
     with open(fname) as f:
         f = f.read()    
         json_text = json.loads(f)
@@ -24,7 +24,9 @@ def json_parser(fname='./data/Train_qa_ans.json'):
     choices = []
     has_ans = 'answer' in json_text[0].keys()
     for i in range(len(json_text)):
-        doc.append(json_text[i]['text'])
+        doc.append([
+            json_text[i]['textidx'.replace('idx', str(i))] for i in [1,2,3]
+        ])
         question.append(json_text[i]['question']['stem'].strip())
         # sort choice by 'A', 'B', 'C' 
         options = json_text[i]['question']['choices']
@@ -63,7 +65,7 @@ class doc_preprocessing():
 
 
     def filter_text(self, docs):
-        redundant = ['民眾', '個管師', '醫師', '護理師']
+        redundant = ['民眾', '個管師', '醫師', '護理師', '家屬']
         redundant = [ role + ele + '：' for role in redundant for ele in ['A', 'B']] + \
                     [ role+'：' for role in redundant]
         if self.remove_stop_word:
@@ -74,6 +76,7 @@ class doc_preprocessing():
         for i, article_doc in enumerate(docs):
             for ele in redundant:
                 article_doc = article_doc.replace(ele, '')
+                article_doc = article_doc.replace('……', '、')
             docs[i] = article_doc
         return docs
 
@@ -126,22 +129,37 @@ class doc_preprocessing():
     
     
     def __call__(self, docs, q, choices):
-        docs = self.filter_text(docs)
-        docs = self.cut_fragment(docs)
-        docs = self.pad_(docs)   
+        # docs = self.filter_text(docs)
+        # docs = self.cut_fragment(docs)
+        # docs = self.pad_(docs)   
         
         # concat q and c for each choice
         query = list(
             map(lambda ele: 
-             [[ele[1],c] for c in choices[ele[0]]], enumerate(q))
+             [ele[1]+c for c in choices[ele[0]]], enumerate(q))
         )
-        query = [self.tokenizer(q) for q in query]
-        query = self.pad_(query)   
+        # query = [self.tokenizer(q) for q in query]
+        encoding = []
+        for i, doc in enumerate(docs):
+            # frags = [ [frag,query[i][j]] for j, frag in enumerate(doc)]
+            concated_context = list(zip(doc, query[i]))
+            # print(concated_context)
+            # print(doc[0], query[0])
+            encoding.append(self.tokenizer(
+                concated_context, 
+                return_tensors='pt', 
+                padding='max_length', 
+                max_length=200
+            ))
+
+
+        # print(encoding[0])
+        # query = self.pad_(query)   
         # c = [self.tokenizer(c, return_tensors='pt', padding='max_length', max_length=40) for c in choices]
         # q = self.tokenizer(q, return_tensors='pt', padding=True)
         # return docs, q, c
         
-        return docs, query
+        return encoding, query
 
 
 def collate_fn(dcts):
@@ -186,20 +204,20 @@ class QA_Dataset(Dataset):
         self.ans = ans
         self.q = query
         # self.choices = c
-        self.ins = doc
+        self.encoding = doc
         #TODO TOKEN TYPE　ID
         # self.choices = [tokenizer(c, return_tensors='pt', padding='max_length', max_length=40) for c in choices]
         
 
     def __getitem__(self, idx):
-        ins = {
-            **{k: v.unsqueeze(0) for k,v in self.ins[idx].items()},
+        example = {
+            **{k: v.unsqueeze(0) for k,v in self.encoding[idx].items()},
             # **{'choi_'+k:v.unsqueeze(0)  for k,v in self.choices[idx].items()},
-            **{'q_'+k:v for k, v in self.q[idx].items()},
+            # **{'q_'+k:v for k, v in self.q[idx].items()},
             'label':torch.tensor(self.ans[idx]['qa']).unsqueeze(-1),
             'risk_label':torch.tensor(self.ans[idx]['risk']).unsqueeze(-1),
         }   
-        return ins
+        return example
     
     
     def __len__(self,) :

@@ -24,44 +24,32 @@ class cosine_sim(nn.Module):
 
     
 class QA_Model(pl.LightningModule):
-    def __init__(self, model_name, lr=1e-4):
+    def __init__(self, model_name, lr=1e-4, num_layer=10):
         super().__init__()
         
         self.lr = lr
         
         config = AutoConfig.from_pretrained(
             model_name,
-            n_layer=2,
-        )
-        self.query_encoder = AutoModel.from_pretrained(
-            model_name,
-            config=config,
+            n_layer=num_layer,
         )
         self.doc_encoder = AutoModel.from_pretrained(
             model_name,
             config=config,
         )
-        
-        setattr(config, 'summary_type', 'mean')
-        setattr(config, 'summary_use_proj', False)
+        # setattr(config, 'summary_type', 'mean')
+        # setattr(config, 'summary_use_proj', True)
 
         self.fragment_summary = SequenceSummary(config)
-        self.doc_summary = SequenceSummary(config)
-        self.query_summary = SequenceSummary(config)
+        # self.doc_summary = SequenceSummary(config)
+        # self.query_summary = SequenceSummary(config)
 
         self.hidden_shape = config.d_model
-        self.cos_sim = cosine_sim()
-        self.query_pj  = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model),
-            nn.GELU(),
-        )
-        self.doc_pj  = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model),
-            nn.GELU(),
-        )
-
-        self.risk_pj = nn.Linear(config.d_model, 2)
-        self.proj = nn.Linear(2*config.d_model, 1)
+        # self.doc_pj  = nn.Sequential(
+        #     nn.Linear(config.d_model, config.d_model),
+        #     nn.GELU(),
+        # )
+        self.proj = nn.Linear(3*config.d_model, 3)
         
     def forward(
         self,
@@ -88,12 +76,12 @@ class QA_Model(pl.LightningModule):
             batch_size = input_ids.size(0)
             flat_input_ids = input_ids.view(-1, input_ids.size(-1))
             flat_attention_mask = attention_mask.view(-1, attention_mask.size(-1))
-            flat_input_mask = input_mask.view(-1, input_mask.size(-1)) if input_mask else None
-            flat_token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids else None
+            flat_input_mask = input_mask.view(-1, input_mask.size(-1)) if input_mask is not None else None
+            flat_token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
                  
-            flat_query_ids = q_input_ids.view(-1, q_input_ids.size(-1))
-            flat_query_typeid = q_token_type_ids.view(-1, q_token_type_ids.size(-1))
-            flat_query_mask = q_attention_mask.view(-1, q_attention_mask.size(-1))
+            flat_query_ids = q_input_ids.view(-1, q_input_ids.size(-1)) if q_input_ids is not None else None
+            flat_query_typeid = q_token_type_ids.view(-1, q_token_type_ids.size(-1)) if q_token_type_ids is not None else None
+            flat_query_mask = q_attention_mask.view(-1, q_attention_mask.size(-1)) if q_attention_mask is not None else None
 
             doc_hidden = self.doc_encoder(
                 flat_input_ids,
@@ -111,43 +99,18 @@ class QA_Model(pl.LightningModule):
                 return_dict=return_dict,
                 **kwargs,
             ).last_hidden_state
-            query_hidden = self.query_encoder(    
-                flat_query_ids,
-                attention_mask=flat_query_mask,
-                token_type_ids=flat_query_typeid,
-            ).last_hidden_state
-            query_summary = self.query_summary(query_hidden).view(batch_size, -1, self.hidden_shape)
-                        
-            # cos_max_out = torch.max(cos_out, 1)
-            fragment_summary = self.fragment_summary(doc_hidden).view(batch_size, -1, self.hidden_shape)
-            cos_sim = self.cos_sim(fragment_summary, query_summary)
-            cos_sim_max = torch.max(cos_sim, 1)
-            
-            rele_frag = torch.cat([fragment_summary.index_select(1, ele[1])[ele[0]] for ele in enumerate(cos_sim_max.indices)])
-            rele_frag = rele_frag.view(batch_size, -1, self.hidden_shape)
-            
-            doc_summary = self.doc_summary(fragment_summary).unsqueeze(1)
-            risk_logits = self.risk_pj(doc_summary).squeeze(1)
-            
-            query_summary = self.query_pj(query_summary)
-            rele_frag = self.doc_pj(rele_frag)
-            
-            # fused_feature = query_summary + rele_frag
-            fused_feature = torch.cat([query_summary, rele_frag], dim=2)
-            qa_logits = self.proj(fused_feature).squeeze(2)
+
+            frag_summary = self.fragment_summary(doc_hidden).view(batch_size, -1, self.hidden_shape)
+            fused_feature = frag_summary.view(batch_size, -1)
+            qa_logits = self.proj(fused_feature)#.squeeze(2)
 
             if label is not None:
                 loss_fct = CrossEntropyLoss()
-                loss_risk = CrossEntropyLoss()
                 
                 loss_qa = loss_fct(qa_logits, label.view(-1))
-                loss_risk = loss_risk(risk_logits, risk_label.view(-1))
-                # print(qa_logits)
-                # print(loss_qa)
-                total_loss = loss_qa# + loss_risk
-                return total_loss, qa_logits, risk_logits
+                total_loss = loss_qa
+                return total_loss, qa_logits, None
             return qa_logits
-#             return ((loss,) + output) if loss is not None else output
 
         
     def training_step(self, batch, _):
@@ -160,12 +123,10 @@ class QA_Model(pl.LightningModule):
 
         loss, qa_logits, risk_logits = self.forward(**batch)
         pred_qa = torch.max(qa_logits, dim=1).indices
-        pred_risk = torch.max(risk_logits, dim=1).indices
 
         metrics = {
             'val_loss': loss, 
             'val_qa_acc': FM.accuracy(batch['label'], pred_qa), 
-            'val_risk_acc':FM.accuracy(batch['risk_label'], pred_risk),
         }
         self.log_dict(metrics, on_epoch=True, prog_bar=True, on_step=False)
         return metrics
@@ -175,16 +136,16 @@ class QA_Model(pl.LightningModule):
         return torch.optim.AdamW(self.parameters(), lr=self.lr)
 
 
-    # def optimizer_step(self, epoch_nb, batch_nb, optimizer, optimizer_i, opt_closure,
-    #     on_tpu=False, using_native_amp=False, using_lbfgs=False,
-    #     ):
-    #     if self.trainer.global_step < 500:
-    #         lr_scale = min(1., float(self.trainer.global_step + 1) / 500.)
-    #         for pg in optimizer.param_groups:
-    #             pg['lr'] = lr_scale * self.lr
+    def optimizer_step(self, epoch_nb, batch_nb, optimizer, optimizer_i, opt_closure,
+        on_tpu=False, using_native_amp=False, using_lbfgs=False,
+        ):
+        if self.trainer.global_step < 50:
+            lr_scale = min(1., float(self.trainer.global_step + 1) / 50.)
+            for pg in optimizer.param_groups:
+                pg['lr'] = lr_scale * self.lr
 
-    #     optimizer.step(closure=opt_closure)
-    #     optimizer.zero_grad()
+        optimizer.step(closure=opt_closure)
+        optimizer.zero_grad()
 
 
     # @staticmethod

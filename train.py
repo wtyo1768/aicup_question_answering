@@ -4,13 +4,16 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from model import QA_Model
 
+
 lr = 3e-5
-EPOCHS = 5
-BATCH_SIZE = 8
+EPOCHS = 15
+BATCH_SIZE = 32
+num_layer=10
+
 NUM_WORKERS = 1
 do_predict = False
-stride=500
-seq_len=500
+stride=64
+seq_len=64
 
 
 config = 'hfl/chinese-xlnet-base'
@@ -39,7 +42,11 @@ val_ds =  QA_Dataset(
     stride=stride,
     max_seq_len=seq_len,    
 )
-model = QA_Model(config, lr=lr)
+model = QA_Model(
+    config, 
+    num_layer=num_layer,
+    lr=lr,
+)
 
 trainer = pl.Trainer(
         gpus = 1,
@@ -69,7 +76,7 @@ trainer.fit(
 
 
 if do_predict:
-
+    qa_train = []
     dev_ds = QA_Dataset(config, qa_train)
 
     pass
