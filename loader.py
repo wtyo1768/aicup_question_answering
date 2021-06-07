@@ -89,7 +89,7 @@ class doc_preprocessing():
         max_seq_len = 0
         for i, doc in enumerate(docs):
             # TODO NO sep for two sentence
-            doc_encoding = self.tokenizer(doc, return_token_type_ids=False)
+            doc_encoding = self.tokenizer(doc, return_token_type_ids=True)
             ids=[]
             # typeids=[]
             st_mask=[]

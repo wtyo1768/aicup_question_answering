@@ -59,9 +59,11 @@ def extrate_fragment(json_data):
         # concat question to choice
         doc_sents = nlp(doc_text)
         sentences = [sen.text for sen in doc_sents.sents]
-        query = list(map(lambda cho: q+cho['text'].strip(), choice))
+
+        query = list(map(lambda cho: cho['text'].strip(), choice))
         scores_sents = np.array([
-            [ SequenceMatcher(None, q, sent).quick_ratio() for q in query] for sent in sentences
+            [ max(SequenceMatcher(None, q, sent).quick_ratio(), SequenceMatcher(None, c, sent).quick_ratio())
+              for c in query] for sent in sentences
         ])
         # top 3 indices
         ind = np.argpartition(scores_sents, -TOP_K_SENT, axis=0)[-TOP_K_SENT:]
