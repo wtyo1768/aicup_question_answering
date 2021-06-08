@@ -12,17 +12,15 @@ import json
 import os
 
 
-lr = 5e-5
-EPOCH = 2
-BATCH_SIZE = 32
+lr = 1e-4
+EPOCH = 5
+BATCH_SIZE = 16
 num_layer=2
 metric_learning = True
-beta = .1
+beta = .3
 
 
-do_predict = False
-
-NUM_WORKERS = 1
+NUM_WORKERS = 4
 do_predict = False
 stride=64
 seq_len=64
@@ -73,9 +71,10 @@ for fold in range(5):
         log_every_n_steps=10, 
         logger=tb_logger,
         callbacks=[EarlyStopping(   
-            monitor='val_acc', min_delta=0.00,
-            patience=5, verbose=False, mode='max'
+            monitor='val_loss', min_delta=0.00,
+            patience=5, verbose=False, mode='min'
         ), checkpoint ],
+        gradient_clip_val=.15
         # auto_scale_batch_size='binsearch',
         # fast_dev_run=True,
         # stochastic_weight_avg=True,

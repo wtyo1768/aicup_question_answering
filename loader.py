@@ -1,6 +1,7 @@
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoTokenizer
 from torch.utils.data import Dataset
+import numpy as np
 import torch
 import json
 
@@ -10,13 +11,14 @@ pad_value = {
             'input_ids':[5],
             'attention_mask':[0],
             'token_type_ids':[3],
-        }
+}
 
 
 def json_parser(fname='./data/train_fold1.json'):
     with open(fname) as f:
         f = f.read()    
         json_text = json.loads(f)
+    # print(fname, len(json_text))
 
     doc = []
     question = []
@@ -128,38 +130,35 @@ class doc_preprocessing():
         return padded_value
     
     
-    def __call__(self, docs, q, choices):
+    def __call__(self, docs, query, cho):
         # docs = self.filter_text(docs)
         # docs = self.cut_fragment(docs)
         # docs = self.pad_(docs)   
         
         # concat q and c for each choice
-        query = list(
-            map(lambda ele: 
-             [ele[1]+c for c in choices[ele[0]]], enumerate(q))
-        )
-        # query = [self.tokenizer(q) for q in query]
+        # query = list(
+        #     map(lambda ele: 
+        #      [[ele[1],c] for c in choices[ele[0]]], enumerate(query))
+        # )
         encoding = []
         for i, doc in enumerate(docs):
             # frags = [ [frag,query[i][j]] for j, frag in enumerate(doc)]
-            concated_context = list(zip(doc, query[i]))
+
+            # concated_context = list(zip(doc, query[i]))
+            concated_context = doc
             # print(concated_context)
             # print(doc[0], query[0])
             encoding.append(self.tokenizer(
                 concated_context, 
                 return_tensors='pt', 
                 padding='max_length', 
-                max_length=200
+                max_length=160
             ))
-
-
-        # print(encoding[0])
-        # query = self.pad_(query)   
-        # c = [self.tokenizer(c, return_tensors='pt', padding='max_length', max_length=40) for c in choices]
-        # q = self.tokenizer(q, return_tensors='pt', padding=True)
-        # return docs, q, c
+            
+        query = [self.tokenizer(q, return_tensors='pt', padding='max_length', max_length=25) for q in query]
+        choice = [self.tokenizer(c, return_tensors='pt', padding='max_length', max_length=30) for c in cho]
         
-        return encoding, query
+        return encoding, query, choice
 
 
 def collate_fn(dcts):
@@ -199,33 +198,38 @@ class QA_Dataset(Dataset):
             max_seq_len=max_seq_len,
             remove_stop_word=remove_stop_word
         )
-        doc, query = pipe(doc, q, choices)
+        doc, query, choice = pipe(doc, q, choices)
+        cls_weight = np.unique([ele['qa'] for ele in ans], return_counts=True)[1]
+        print(cls_weight)
+        # self.cls_weight = torch.tensor(sum(cls_weight) / (cls_weight*3))
 
-        self.ans = ans
-        self.q = query
-        # self.choices = c
         self.encoding = doc
+        self.q = query
+        self.choice = choice
+        self.ans = ans
+
         #TODO TOKEN TYPE　ID
-        # self.choices = [tokenizer(c, return_tensors='pt', padding='max_length', max_length=40) for c in choices]
         
 
     def __getitem__(self, idx):
         example = {
             **{k: v.unsqueeze(0) for k,v in self.encoding[idx].items()},
-            # **{'choi_'+k:v.unsqueeze(0)  for k,v in self.choices[idx].items()},
-            # **{'q_'+k:v for k, v in self.q[idx].items()},
-            'label':torch.tensor(self.ans[idx]['qa']).unsqueeze(-1),
-            'risk_label':torch.tensor(self.ans[idx]['risk']).unsqueeze(-1),
+            **{'cho_'+k:v  for k,v in self.choice[idx].items()},
+            **{'q_'+k:v for k, v in self.q[idx].items()},
         }   
+        if not self.ans == []:
+            example.update({            
+                'label':torch.tensor(self.ans[idx]['qa']).unsqueeze(-1),
+                'risk_label':torch.tensor(self.ans[idx]['risk']).unsqueeze(-1),
+            })
         return example
     
     
     def __len__(self,) :
-        return len(self.ans)
+        return len(self.q)
     
     
-
-    
+ 
     
 if __name__=='__main__':
     from transformers import AutoTokenizer

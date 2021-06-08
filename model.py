@@ -49,25 +49,26 @@ class QA_Model(pl.LightningModule):
         # self.doc_summary = SequenceSummary(config)
         # self.query_summary = SequenceSummary(config)
         self.d_model = config.d_model
-        n_head =4
-        self.d_proj = 768//2
+        n_head =2
+        self.d_proj = 768
+        dropout = .1
+        self.choq_att = nn.MultiheadAttention(768, n_head, dropout=dropout)
 
-        self.choq_att = nn.MultiheadAttention(768, n_head, dropout=.1)
+        self.self_attn = nn.MultiheadAttention(768, n_head, dropout=dropout)
 
-        self.self_attn = nn.MultiheadAttention(768, n_head, dropout=.1)
-
-        self.ans_attn = nn.MultiheadAttention(768, n_head, dropout=.1)
+        self.ans_attn = nn.MultiheadAttention(768, n_head, dropout=dropout)
         
         self.layer_norm1 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         self.layer_norm2 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         self.layer_norm3 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         
-        self.lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True)
-        self.q_lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True)
+        self.lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True, dropout=dropout)
+        self.bi_lstm = nn.LSTM(768, 384, 1, batch_first=True, bidirectional=True, dropout=dropout)
+        self.q_lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True, dropout=dropout)
 
         self.proj =  nn.Sequential(
             nn.Linear(self.d_proj, self.d_proj),
-            nn.Dropout(.1),
+            nn.Dropout(dropout),
             nn.GELU(),
         )
         self.layer_norm4 = nn.LayerNorm(self.d_proj, eps=config.layer_norm_eps)
@@ -111,7 +112,6 @@ class QA_Model(pl.LightningModule):
             flat_cho_typeid = cho_token_type_ids.view(-1, cho_token_type_ids.size(-1)) if cho_token_type_ids is not None else None
             flat_cho_mask = cho_attention_mask.view(-1, cho_attention_mask.size(-1)) if cho_attention_mask is not None else None
 
-            # print(flat_cho_ids.shape, )
             doc_hidden = self.doc_encoder(
                 flat_input_ids,
                 token_type_ids=flat_token_type_ids,
@@ -139,16 +139,15 @@ class QA_Model(pl.LightningModule):
             cho_hidden = cho_hidden.view(batch_size, 3, -1, self.d_model)
             query_hidden = query_hidden.view(batch_size, q_input_ids.size(-1), self.d_model)
 
-
-            h_frag = torch.split(doc_hidden, 1, dim=1)
-            h_frag = [ele.squeeze(1).transpose(0,1) for ele in h_frag]
-            h_query = query_hidden.transpose(0,1)
-            # print(flat_attention_mask.shape, h_frag[i].shape)
+            frag_hidden = torch.split(doc_hidden, 1, dim=1)
+            frag_hidden = [ele.squeeze(1).transpose(0,1) for ele in frag_hidden]
+            
+            # print(flat_attention_mask.shape, frag_hidden[i].shape)
             att_mask = flat_attention_mask.view(batch_size, 3, input_ids.size(-1))
             att_mask = torch.split(att_mask, 1, dim=1)
-            # print(att_mask[0].shape, h_frag[0].shape)
+            # print(att_mask[0].shape, frag_hidden[0].shape)
             # queried_hidden = [
-            #     self.context_attn(h_query, h_frag[i], h_frag[i], 
+            #     self.context_attn(h_query, frag_hidden[i], frag_hidden[i], 
             #     # key_padding_mask=torch.logical_not(att_mask[i].squeeze(1)).type(torch.bool)
             #     )[0] for i in range(3)]
             # queried_hidden = [self.layer_norm(q_hidden)+h_query for q_hidden in queried_hidden]
@@ -157,11 +156,11 @@ class QA_Model(pl.LightningModule):
             h_cho = [ele.squeeze(1).transpose(0,1) for ele in torch.split(cho_hidden, 1, dim=1)]
             
             # q_mask = torch.logical_not(flat_query_mask).type(torch.bool)
-            cho_quried_h = [self.ans_attn(h_cho[i], h_frag[i], h_frag[i],
-             key_padding_mask=torch.logical_not(att_mask[i].squeeze(1)).type(torch.bool)
+            cho_quried_h = [self.ans_attn(h_cho[i], frag_hidden[i], frag_hidden[i],
+            #  key_padding_mask=torch.logical_not(att_mask[i].squeeze(1)).type(torch.bool)
              )[0] for i in range(3)]
 
-
+            h_query = query_hidden.transpose(0,1)
             double_quried_h =[self.choq_att(cho_quried_h[i], h_query, h_query)[0] for i in range(3)] 
             double_quried_h = [ele.transpose(0, 1) for ele in double_quried_h]
             
@@ -169,7 +168,8 @@ class QA_Model(pl.LightningModule):
             # cho_quried_h = cho_quried_h + self.layer_norm1(cho_hidden)
 
             doubled_hidden = torch.stack(double_quried_h, dim=1)
-            answer_hidden = cho_quried_h + self.layer_norm2(doubled_hidden)
+            # answer_hidden = cho_quried_h + self.layer_norm2( = doubled_hidden)
+            answer_hidden  = doubled_hidden
             # answer_hidden = torch.stack([ele.transpose(0, 1) for ele in cho_quried_h], dim=1)
             answer_hidden = answer_hidden.view(3*batch_size, -1, 768)
 
@@ -179,7 +179,6 @@ class QA_Model(pl.LightningModule):
             # ).last_hidden_state
 
             # answer_hidden = answer_hidden.transpose(0, 1)
-
             # self_attend_h, _ = self.self_attn(answer_hidden, answer_hidden, answer_hidden)
             # self_attend_h = self_attend_h.transpose(0, 1)
             # self_attend_h = self.layer_norm3(self_attend_h) + answer_hidden.transpose(0, 1)
@@ -187,19 +186,21 @@ class QA_Model(pl.LightningModule):
             # q_output, _ = self.q_lstm(query_hidden)
             # q_output = q_output[:, -1, :].unsqueeze(1)
             # print(answer_hidden.shape)
+
             output, _ = self.lstm(answer_hidden)
             output = output[:,-1,:]
-
-
+            output = output.view(batch_size, -1, self.d_proj)
+            output, _ = self.bi_lstm(output)
+            
+            # print(output.shape)
             answer_hidden = output.view(batch_size, -1, self.d_proj)
             # print(answer_hidden.shape, q_output.shape)
             # q_output = q_output.expand(-1, 3, self.d_proj)
             # answer_hidden = torch.cat([answer_hidden, q_output], dim=2)
 
             qa_logits = self.proj(answer_hidden)
-            qa_logits = self.layer_norm4(qa_logits)+ answer_hidden
+            # qa_logits = self.layer_norm4(qa_logits)+ answer_hidden
             qa_logits = self.logit_proj(answer_hidden).squeeze(2)
-
 
             if self.metric_learning and label is not None:
                 all_label = torch.tensor([0, 1, 2]).repeat(batch_size, 1).type_as(label)
@@ -220,24 +221,34 @@ class QA_Model(pl.LightningModule):
                 neg_x = F.normalize(neg_x, dim=-1, p=2)
                 neg_loss = 2 + (neg_x*pos_x).sum(dim=-1) + (neg_x*pos_y).sum(dim=-1)
                 metric_loss = (pos_loss + neg_loss/2).mean() * self.beta
+                # print(qa_logits)
             if label is not None:
                 loss_fct = CrossEntropyLoss()
                 
                 loss_qa = loss_fct(qa_logits, label.view(-1))
                 total_loss = loss_qa
-                return total_loss, qa_logits, None
+                if self.metric_learning:
+                    total_loss = total_loss + metric_loss
+                    return total_loss, qa_logits, (loss_qa, metric_loss)
+                else:
+                    return total_loss, qa_logits, None
             return qa_logits
 
         
     def training_step(self, batch, _):
-        loss, _, _ = self.forward(**batch)
+        loss, _, l = self.forward(**batch)
         self.log("loss", loss, on_step=True)
+        if self.metric_learning:
+            self.log("ent_loss", l[0], on_step=True, prog_bar=True)
+            self.log("mat_loss", l[1], on_step=True, prog_bar=True)
+    
         return loss
 
 
     def validation_step(self, batch, batch_idx):
-
         loss, qa_logits, risk_logits = self.forward(**batch)
+        # print(qa_logits)
+
         label = batch['label'].view(-1)
         pred_qa = torch.max(qa_logits, dim=1).indices
 
