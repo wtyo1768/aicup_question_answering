@@ -187,11 +187,32 @@ class QA_Dataset(Dataset):
         fname, 
         stride=500,
         max_seq_len=500,
-        remove_stop_word=False
+        remove_stop_word=False,
+        upsample=False,
         ):
         super().__init__()
-        
+        self.upsample = upsample
         doc, q, choices, ans = json_parser(fname) 
+
+        # Upsampling
+        cls_weight = np.unique([ele['qa'] for ele in ans], return_counts=True)[1]
+        print(cls_weight)
+        # self.cls_weight = torch.tensor(sum(cls_weight) / (cls_weight*3))
+        if self.upsample:
+            Upsample = (cls_weight[2] - cls_weight[1]) // 2
+            for i, a in enumerate(ans):
+                # print(a)
+                if a['qa']==2:
+                    ans[i]['qa'] = 1
+                    doc[i][2], doc[i][1] = doc[i][1], doc[i][2]
+                    choices[i][2], choices[i][1] = choices[i][1], choices[i][2] 
+                    Upsample-=1
+                    if Upsample==0:
+                        break
+            cls_weight = np.unique([ele['qa'] for ele in ans], return_counts=True)[1]
+            print(cls_weight)
+
+
         pipe = doc_preprocessing(
             tokenizer, 
             stride=stride,
@@ -199,9 +220,7 @@ class QA_Dataset(Dataset):
             remove_stop_word=remove_stop_word
         )
         doc, query, choice = pipe(doc, q, choices)
-        cls_weight = np.unique([ele['qa'] for ele in ans], return_counts=True)[1]
-        print(cls_weight)
-        # self.cls_weight = torch.tensor(sum(cls_weight) / (cls_weight*3))
+
 
         self.encoding = doc
         self.q = query
@@ -219,7 +238,8 @@ class QA_Dataset(Dataset):
         }   
         if not self.ans == []:
             example.update({            
-                'label':torch.tensor(self.ans[idx]['qa']).unsqueeze(-1),
+                # 'label':torch.tensor(self.ans[idx]['qa']).unsqueeze(-1),
+                'label': torch.eye(3, dtype=torch.long)[self.ans[idx]['qa']],
                 'risk_label':torch.tensor(self.ans[idx]['risk']).unsqueeze(-1),
             })
         return example

@@ -20,7 +20,7 @@ metric_learning = False
 beta = .3
 
 
-NUM_WORKERS = 4
+NUM_WORKERS = 16
 do_predict = False
 stride=64
 seq_len=64
@@ -49,7 +49,7 @@ for fold in range(5):
     print('training fold', fold, '...')
     train_ds = QA_Dataset(
         tokenizer, train.replace('idx', str(fold)), 
-        stride=stride, max_seq_len=seq_len,
+        stride=stride, max_seq_len=seq_len, upsample=False,
     )
     val_ds =  QA_Dataset(
         tokenizer, val.replace('idx', str(fold)), 
@@ -116,10 +116,11 @@ for fold in range(5):
         )
 
         pred = trainer.predict(model, val_loader)
-
-        pred = torch.cat(pred, dim=0)
-        pred = torch.max(pred, dim=1).indices
-        pred = pred.cpu().numpy()
+        pred = model.get_pred(torch.cat(pred, dim=0))
+        # print(pred.shape)
+        # pred = torch.cat(pred, dim=0)
+        # pred = torch.max(pred, dim=1).indices
+        # pred = pred.cpu().numpy()
 
         with open(val.replace('idx', str(fold)), 'r') as f:
             f = f.read()
@@ -154,6 +155,6 @@ for fold in range(5):
             collate_fn=collate_fn,
         )
         pred = trainer.predict(model, dev_loader)
-        pred = torch.cat(pred, dim=0)
+        pred = model.get_pred(torch.cat(pred, dim=0))
         # print(pred.shape)
         break
