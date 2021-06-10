@@ -52,6 +52,19 @@ def strQ2B(uchar):
     return u_code
 
 
+def question_semantic(query):
+    context = ['沒有', '錯誤', '不正確', '不是', '有誤', '不曾', '不包含', '測不到', '不符']
+    label = []
+    for q in query:
+        for v in context:
+            if(q.find(v)!=-1):
+                label.append(0)
+                break
+            elif v==context[-1]: 
+                label.append(1)
+    return label
+
+
 class doc_preprocessing():
     def __init__(
             self, 
@@ -140,6 +153,7 @@ class doc_preprocessing():
         #     map(lambda ele: 
         #      [[ele[1],c] for c in choices[ele[0]]], enumerate(query))
         # )
+        q_label = question_semantic(query)
         encoding = []
         for i, doc in enumerate(docs):
             # frags = [ [frag,query[i][j]] for j, frag in enumerate(doc)]
@@ -158,7 +172,7 @@ class doc_preprocessing():
         query = [self.tokenizer(q, return_tensors='pt', padding='max_length', max_length=25) for q in query]
         choice = [self.tokenizer(c, return_tensors='pt', padding='max_length', max_length=30) for c in cho]
         
-        return encoding, query, choice
+        return encoding, query, choice, q_label
 
 
 def collate_fn(dcts):
@@ -219,13 +233,14 @@ class QA_Dataset(Dataset):
             max_seq_len=max_seq_len,
             remove_stop_word=remove_stop_word
         )
-        doc, query, choice = pipe(doc, q, choices)
+        doc, query, choice, q_label = pipe(doc, q, choices)
 
 
         self.encoding = doc
         self.q = query
         self.choice = choice
         self.ans = ans
+        self.q_label = q_label
 
         #TODO TOKEN TYPE　ID
         
@@ -235,6 +250,7 @@ class QA_Dataset(Dataset):
             **{k: v.unsqueeze(0) for k,v in self.encoding[idx].items()},
             **{'cho_'+k:v  for k,v in self.choice[idx].items()},
             **{'q_'+k:v for k, v in self.q[idx].items()},
+            'q_label':torch.tensor(self.q_label[idx]).unsqueeze(-1)
         }   
         if not self.ans == []:
             example.update({            

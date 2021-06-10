@@ -15,9 +15,9 @@ import os
 lr = 1e-4
 EPOCH = 5
 BATCH_SIZE = 32
-num_layer=2
+num_layer=3
 metric_learning = False
-beta = .3
+beta = .5
 
 
 NUM_WORKERS = 16
