@@ -152,7 +152,7 @@ class doc_preprocessing():
                 concated_context, 
                 return_tensors='pt', 
                 padding='max_length', 
-                max_length=320
+                max_length=170
             ))
             
         query = [self.tokenizer(q, return_tensors='pt', padding='max_length', max_length=25) for q in query]

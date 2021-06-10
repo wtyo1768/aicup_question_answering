@@ -8,7 +8,52 @@ import pytorch_lightning as pl
 import torchmetrics
 from torch import nn
 import torch
+import math 
 
+
+
+def mask_logits(target, mask):
+    return target * mask + (1-mask) * (-1e30)
+
+class MultiheadAttention(nn.Module):
+    def __init__(self, d_model, n_head, dropout):
+        super(MultiheadAttention, self).__init__()
+        self.d_model = d_model
+
+        self.Wq = nn.Linear(d_model, d_model)
+        self.Wk = nn.Linear(d_model, d_model)
+        self.Wv = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.n_head = n_head
+
+        self.d_k = d_model // n_head
+        self.a = 1 / math.sqrt(self.d_k)
+        self.fc = nn.Linear(d_model, d_model)
+
+
+    def forward(self, query, context, q_mask=None, c_mask=None):
+        bs, q_len, _ = query.size()
+        c_len = context.size(-2)
+        n_head, d_k = self.n_head, self.d_k
+
+        q = self.Wq(query).view(bs, q_len, n_head, d_k)
+        k = self.Wk(context).view(bs, c_len, n_head, d_k)
+        v = self.Wv(context).view(bs, c_len, n_head, d_k)
+
+        q = q.permute(2, 0, 1, 3).contiguous().view(bs*n_head, q_len, d_k)
+        k = k.permute(2, 0, 1, 3).contiguous().view(bs*n_head, c_len, d_k)
+        v = v.permute(2, 0, 1, 3).contiguous().view(bs*n_head, c_len, d_k)
+
+        c_mask = c_mask.unsqueeze(1).repeat(n_head, 1, 1)
+        s = torch.bmm(q, k.transpose(1, 2)) * self.a
+        s = mask_logits(s, c_mask)
+        s = F.softmax(s, dim=2)
+        s = self.dropout(s)
+        out = torch.bmm(s, v)
+        out = out.view(n_head, bs, q_len, d_k).permute(1,2,0,3).contiguous().view(bs, q_len, self.d_model)
+        out = self.fc(out)
+        return self.dropout(out)
+       
 
 class cosine_sim(nn.Module):
     def __init__(self, config=None):
@@ -50,21 +95,18 @@ class QA_Model(pl.LightningModule):
         # self.doc_summary = SequenceSummary(config)
         # self.query_summary = SequenceSummary(config)
         self.d_model = config.d_model
-        n_head =4
+        n_head =2
         self.d_proj = 768
-        dropout = .1
-        self.choq_att = nn.MultiheadAttention(768, n_head, dropout=dropout)
+        dropout = .2
 
-        self.ans_attn = nn.MultiheadAttention(768, n_head, dropout=dropout)
+        self.choq_att = MultiheadAttention(768, n_head, dropout=dropout)
+        self.ans_attn = MultiheadAttention(768, n_head, dropout=dropout)
         
         self.layer_norm1 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         self.layer_norm2 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         self.layer_norm3 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         
         self.lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True, dropout=dropout)
-
-        self.self_att = nn.MultiheadAttention(768, 2, dropout=dropout)
-
         self.bi_lstm = nn.LSTM(768, 384, 1, batch_first=True, bidirectional=True, dropout=dropout)
         self.q_lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True, dropout=dropout)
 
@@ -90,7 +132,6 @@ class QA_Model(pl.LightningModule):
         cho_attention_mask=None,
         input_mask=None,
         mems=None,
-        perm_mask=None,
         target_mapping=None,
         head_mask=None,
         label=None,
@@ -120,7 +161,6 @@ class QA_Model(pl.LightningModule):
                 token_type_ids=flat_token_type_ids,
                 attention_mask=flat_attention_mask,
                 mems=mems,
-                inputs_embeds=None,
                 use_mems=use_mems,
                 output_attentions=output_attentions, 
                 output_hidden_states=output_hidden_states,
@@ -142,71 +182,35 @@ class QA_Model(pl.LightningModule):
             cho_hidden = cho_hidden.view(batch_size, 3, -1, self.d_model)
             query_hidden = query_hidden.view(batch_size, q_input_ids.size(-1), self.d_model)
 
-            frag_hidden = torch.split(doc_hidden, 1, dim=1)
-            frag_hidden = [ele.squeeze(1).transpose(0,1) for ele in frag_hidden]
+            cho_hidden = [ele.squeeze(1) for ele in torch.split(cho_hidden, 1, dim=1)]
+            frag_hidden = [ele.squeeze(1) for ele in torch.split(doc_hidden, 1, dim=1)]
+            att_mask = torch.split(attention_mask, 1, dim=1)
+
+            cho_quried_h = [self.ans_attn(cho_hidden[i], frag_hidden[i], None, att_mask[i].squeeze(1)) 
+                            for i in range(3)]
+            # cho_quried_h = [self.layer_norm1(ele)+cho_hidden[i] for i, ele in enumerate(cho_quried_h)]
+
+
+            double_quried_h =[self.choq_att(cho_quried_h[i], query_hidden, None, flat_query_mask) 
+                            for i in range(3)] 
+            # double_quried_h = [self.layer_norm2(ele)+cho_quried_h[i] for i, ele in enumerate(cho_quried_h)]
             
-            att_mask = flat_attention_mask.view(batch_size, 3, input_ids.size(-1))
-            att_mask = torch.split(att_mask, 1, dim=1)
-
-            # queried_hidden = [
-            #     self.context_attn(h_query, frag_hidden[i], frag_hidden[i], 
-            #     # key_padding_mask=torch.logical_not(att_mask[i].squeeze(1)).type(torch.bool)
-            #     )[0] for i in range(3)]
-            # queried_hidden = [self.layer_norm(q_hidden)+h_query for q_hidden in queried_hidden]
-            # queried_hidden = torch.stack([ele.transpose(0, 1) for ele in queried_hidden], dim=1)
-
-            h_cho = [ele.squeeze(1).transpose(0,1) for ele in torch.split(cho_hidden, 1, dim=1)]
-            
-            # q_mask = torch.logical_not(flat_query_mask).type(torch.bool)
-            cho_quried_h = [self.ans_attn(h_cho[i], frag_hidden[i], frag_hidden[i],
-            #  key_padding_mask=torch.logical_not(att_mask[i].squeeze(1)).type(torch.bool)
-             )[0] for i in range(3)]
-
-            h_query = query_hidden.transpose(0,1)
-            double_quried_h =[self.choq_att(cho_quried_h[i], h_query, h_query,
-                            #  key_padding_mask=torch.logical_not(att_mask[i].squeeze(1)).type(torch.bool)
-            )[0] for i in range(3)] 
-            double_quried_h = [ele.transpose(0, 1) for ele in double_quried_h]
-            
-            cho_quried_h = torch.stack([ele.transpose(0, 1) for ele in cho_quried_h], dim=1)
-            # cho_quried_h = cho_quried_h + self.layer_norm1(cho_hidden)
-
             answer_hidden = torch.stack(double_quried_h, dim=1)
-            # print(doubled_hidden.shape, cho_quried_h.shape)
-            # answer_hidden = torch.cat([doubled_hidden, cho_quried_h], dim=2)
-            # print(fused_hidden.shape)
-            # answer_hidden = cho_quried_h + self.layer_norm2(doubled_hidden)
-            answer_hidden  = self.layer_norm2(answer_hidden)
-            # answer_hidden = torch.stack([ele.transpose(0, 1) for ele in cho_quried_h], dim=1)
+            # answer_hidden  = self.layer_norm2(answer_hidden)  
             answer_hidden = answer_hidden.view(3*batch_size, -1, 768)
-
-            # answer_hidden = answer_hidden.transpose(0, 1)
-            # 
-            # self_attend_h = self_attend_h.transpose(0, 1)
-            # self_attend_h = self.layer_norm3(self_attend_h) + answer_hidden.transpose(0, 1)
-
-            # q_output, _ = self.q_lstm(query_hidden)
-            # q_output = q_output[:, -1, :].unsqueeze(1)
-            # print(answer_hidden.shape)
-
-            output, _ = self.lstm(answer_hidden)
-            output = output[:,-1,:]
-            output = output.view(batch_size, -1, self.d_proj)
+            
+            if False:
+                output = self.fragment_summary(answer_hidden).view(batch_size, 3, 768)
+            else:
+                output, _ = self.lstm(answer_hidden)
+                output = output[:,-1,:]
+                output = output.view(batch_size, -1, self.d_proj)
 
             output, _ = self.bi_lstm(output)
-            # output = output.transpose(0, 1)
-            # output, _ = self.self_att(output, output, output)
-            # output = output.transpose(0, 1)
-
+            output = self.layer_norm4(output)
             answer_hidden = output.view(batch_size, -1, self.d_proj)
-            # print(answer_hidden.shape, q_output.shape)
-            # q_output = q_output.expand(-1, 3, self.d_proj)
-            # answer_hidden = torch.cat([answer_hidden, q_output], dim=2)
-
-            # qa_logits = self.proj(answer_hidden)
-            # qa_logits = self.layer_norm4(qa_logits)+ answer_hidden
-            # answer_hidden = torch.reshape(answer_hidden, (batch_size, -1))
             qa_logits = self.logit_proj(answer_hidden)#.squeeze(2)
+
             if self.metric_learning and label is not None:
                 all_label = torch.tensor([0, 0, 0]).repeat(batch_size, 1).type_as(label)
                 pos_sample = torch.masked_select(all_label, all_label!=label.repeat(1, 3)).view(batch_size, 2)

@@ -11,7 +11,7 @@ import json
 
 
 @Language.component("set_custom_boundaries")
-def set_custom_boundaries(doc):
+def set_custom_boundaries(doc, on_special_token=True):
     
     position = ['民眾', '個管師', '醫師', '女醫師', '護理師', '家屬', '藥師', ]
     position = [ role+'：' for role in position] + \
@@ -20,7 +20,7 @@ def set_custom_boundaries(doc):
     for token in doc[:-1]:
         if token.text in position:
             doc[token.i].is_sent_start = True
-        elif token.i>0 and doc[token.i-1].text in ['，', '？', '。', ]:
+        elif on_special_token and token.i>0 and doc[token.i-1].text in ['，', '？', '。', ]:
             doc[token.i].is_sent_start = True
         else:
             doc[token.i].is_sent_start = False
@@ -38,7 +38,7 @@ bined_train = './data/train_foldidx.json'
 bined_val = './data/val_foldidx.json'
 
 
-MAX_SEQ_LEN = 470*2
+MAX_SEQ_LEN = 470*1
 TOP_K_SENT = 3
 CHOICE_NUM=3
 

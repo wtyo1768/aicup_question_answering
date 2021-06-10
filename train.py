@@ -74,7 +74,7 @@ for fold in range(5):
             monitor='val_loss', min_delta=0.00,
             patience=5, verbose=False, mode='min'
         ), checkpoint ],
-        gradient_clip_val=.15
+        # gradient_clip_val=.15,
         # auto_scale_batch_size='binsearch',
         # fast_dev_run=True,
         # stochastic_weight_avg=True,
