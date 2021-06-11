@@ -1,9 +1,12 @@
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoTokenizer
 from torch.utils.data import Dataset
+from spacy.language import Language
+from spacy.lang.zh import Chinese
 import numpy as np
 import torch
 import json
+import spacy
 
 #TODO Normalize number and Eng char
 
@@ -12,6 +15,21 @@ pad_value = {
             'attention_mask':[0],
             'token_type_ids':[3],
 }
+
+
+@Language.component("set_custom_boundaries")
+def set_custom_boundaries(doc):
+    
+    position = ['民眾', '個管師', '醫師', '女醫師', '護理師', '家屬', '藥師', ]
+    position = [ role+'：' for role in position] + \
+                [ role + ele + '：' for role in position for ele in ['A', 'B', '1', '2']]
+
+    for token in doc[:-1]:
+        if token.text in position:
+            doc[token.i].is_sent_start = True
+        else:
+            doc[token.i].is_sent_start = False
+    return doc
 
 
 def json_parser(fname='./data/train_fold1.json'):
@@ -25,9 +43,10 @@ def json_parser(fname='./data/train_fold1.json'):
     ans = []
     choices = []
     has_ans = 'answer' in json_text[0].keys()
+
     for i in range(len(json_text)):
         doc.append([
-            json_text[i]['textidx'.replace('idx', str(i))] for i in [1,2,3]
+            json_text[i]['textidx'.replace('idx', str(j))] for j in [1,2,3]
         ])
         question.append(json_text[i]['question']['stem'].strip())
         # sort choice by 'A', 'B', 'C' 
@@ -140,20 +159,65 @@ class doc_preprocessing():
         #     map(lambda ele: 
         #      [[ele[1],c] for c in choices[ele[0]]], enumerate(query))
         # )
+        
+        nlp = spacy.load("zh_core_web_sm")
+        nlp = Chinese()
+        nlp = Chinese.from_config({"nlp": {"tokenizer":{"segmenter": "pkuseg"}}})
+        nlp.tokenizer.initialize(pkuseg_model="mixed", pkuseg_user_dict='./data/pkuseg_user_dict.txt')
+        nlp.add_pipe("sentencizer")
+        nlp.add_pipe("set_custom_boundaries")
+
+        role = [
+            ['民眾',],
+            ['家屬',],
+            ['個管師',],
+            ['醫師', '女醫師'],
+            ['護理師', '藥師', ],
+        ]
+        all_role = [
+            [r+postfix for r in sublist for postfix in ['' ,'A', 'B', '1', '2']] 
+            for sublist in role 
+        ]
+        role_map = {
+            k:i for i, sublist in enumerate(all_role) for k in  sublist
+        }
         encoding = []
         for i, doc in enumerate(docs):
-            # frags = [ [frag,query[i][j]] for j, frag in enumerate(doc)]
+            roldid = []
+            # print(doc)
+            if False:
+                for subdoc in doc:
+                    sents = [s.text for s in nlp(subdoc).sents]
+                    encoding = [self.tokenizer(s[3:]) for s in sents]
+                    # print(sents)
+                    role = [role_map[s[:s.find('：')]] for s in sents]
+                    # print(sents)
+                    print(role)
 
-            # concated_context = list(zip(doc, query[i]))
-            concated_context = doc
-            # print(concated_context)
-            # print(doc[0], query[0])
-            encoding.append(self.tokenizer(
-                concated_context, 
-                return_tensors='pt', 
-                padding='max_length', 
-                max_length=170
-            ))
+                    break
+                    sents_encodnig =  self.tokenizer(
+                        sents, 
+                        return_tensors='pt', 
+                        padding='max_length', 
+                        max_length=170
+                    )
+                    [s[3:] for s in sents]
+
+            else:
+                # frags = [ [frag,query[i][j]] for j, frag in enumerate(doc)]
+
+                # concated_context = list(zip(doc, query[i]))
+                concated_context = doc
+                # print(concated_context)
+                # print(doc[0], query[0])
+                # print(len(concated_context[0]),len(concated_context[1]),len(concated_context[2]))
+                # concated_context = ''.join(doc)
+                encoding.append(self.tokenizer(
+                    concated_context, 
+                    return_tensors='pt', 
+                    padding='max_length', 
+                    max_length=270#*3
+                ))
             
         query = [self.tokenizer(q, return_tensors='pt', padding='max_length', max_length=25) for q in query]
         choice = [self.tokenizer(c, return_tensors='pt', padding='max_length', max_length=30) for c in cho]
@@ -196,7 +260,7 @@ class QA_Dataset(Dataset):
 
         # Upsampling
         cls_weight = np.unique([ele['qa'] for ele in ans], return_counts=True)[1]
-        print(cls_weight)
+        # print(doc[0:3])
         # self.cls_weight = torch.tensor(sum(cls_weight) / (cls_weight*3))
         if self.upsample:
             Upsample = (cls_weight[2] - cls_weight[1]) // 2

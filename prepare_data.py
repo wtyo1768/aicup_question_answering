@@ -14,8 +14,7 @@ import json
 def set_custom_boundaries(doc, on_special_token=True):
     
     position = ['民眾', '個管師', '醫師', '女醫師', '護理師', '家屬', '藥師', ]
-    position = [ role+'：' for role in position] + \
-                [ role + ele + '：' for role in position for ele in ['A', 'B', '1', '2']]
+    position = [ role + ele + '：' for role in position for ele in ['', 'A', 'B', '1', '2']]
 
     for token in doc[:-1]:
         if token.text in position:
@@ -38,7 +37,7 @@ bined_train = './data/train_foldidx.json'
 bined_val = './data/val_foldidx.json'
 
 
-MAX_SEQ_LEN = 470*1
+MAX_SEQ_LEN = 270*3
 TOP_K_SENT = 3
 CHOICE_NUM=3
 
@@ -76,6 +75,8 @@ def extrate_fragment(json_data):
     nlp.add_pipe("set_custom_boundaries")
     
     for i, article in enumerate(json_data): 
+        # i = 42
+        # article = json_data[42]
         doc_text = article['text']
         q = article['question']['stem'].strip()
 
@@ -91,7 +92,7 @@ def extrate_fragment(json_data):
             [ SequenceMatcher(None, q+c, sent).quick_ratio()
               for c in query] for sent in sentences
         ])
-        ind_q = np.argpartition(scores_sents, -TOP_K_SENT, axis=0)[-TOP_K_SENT:]
+        ind_q = np.argpartition(scores_sents, -2, axis=0)[-2:]
         # for choice
         scores_sents_cho = np.array([
             [ SequenceMatcher(None, c, sent).quick_ratio()
@@ -115,26 +116,29 @@ def extrate_fragment(json_data):
         for choice_idx in range(3):
             sen_idx = ind[:, choice_idx]
             sen_idx = np.sort(np.unique(sen_idx))
-            next_sen_distence = np.insert(sen_idx[:-1], 0, 0)
+            next_sen_distence = np.insert(sen_idx[:-1], 0, -2)
 
             # print(sen_idx)
             # print(next_sen_distence)
             # print(sen_idx - next_sen_distence > 2)
             sen_idx = sen_idx[sen_idx - next_sen_distence > 2]
-            
             seq_num = sen_idx.shape[0]
-            # print(sen_idx, seq_num)
+
             total_frag = ''
             frag=''
             for sidx in sen_idx:
                 # init the key sentence
                 frag = sentences[sidx]
-                total_seq_len = len(tokenizer.tokenize(sentences[sidx]))
+                #TODO overflow of sentence
+                total_seq_len = len(tokenizer.tokenize(frag))
+                # if total_seq_len>100:
+                #     print(frag)
+                # print(choice_idx,  total_seq_len)
                 head = tail = sidx
                 direction = 0 
                 # Add context for key sentence
                 while(True):
-                    # print(head, tail)
+                    # print(i, sidx, head, tail, total_seq_len)
                     if head-1>=0 and direction==0:
                         token_len = len(tokenizer.tokenize(sentences[head-1]))
 
@@ -143,8 +147,7 @@ def extrate_fragment(json_data):
                         head-=1
                         frag = sentences[head] + frag
                         total_seq_len += token_len
-                    elif tail+1<len(sentences) and direction==1:
-                        
+                    elif tail+1<len(sentences) and direction==1:                   
                         token_len = len(tokenizer.tokenize(sentences[tail+1]))
 
                         if total_seq_len+token_len > MAX_SEQ_LEN/(CHOICE_NUM*seq_num):
@@ -154,18 +157,25 @@ def extrate_fragment(json_data):
                         total_seq_len += token_len
                     elif head==0 and tail==len(sentences)-1:
                         break
-
                     direction = not direction
+
+                # print(len(frag))
                 total_frag+=frag+'<sep>'
                     # break
             # print(sen_idx)
             # print(*[sentences[sidx] for sidx in sen_idx], sep=',')
-            extract_frag.append(total_frag[:-5])  
+            extract_frag.append(total_frag)  
             # print(total_frag, len(total_frag))
             # break   
+        # print(i, len(extract_frag[0]), len(extract_frag[1]), len(extract_frag[2]))
+        # assert len(tokenizer.tokenize(extract_frag[0]))<MAX_SEQ_LEN/CHOICE_NUM 
+        # assert len(tokenizer.tokenize(extract_frag[1]))<MAX_SEQ_LEN/CHOICE_NUM 
+        # assert len(tokenizer.tokenize(extract_frag[2]))<MAX_SEQ_LEN/CHOICE_NUM 
+
         json_data[i]['text1'] = extract_frag[0]
         json_data[i]['text2'] = extract_frag[1]
         json_data[i]['text3'] = extract_frag[2]
+        # break
     return json_data
 
 

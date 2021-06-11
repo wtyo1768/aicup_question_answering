@@ -12,10 +12,10 @@ import json
 import os
 
 
-lr = 1e-4
+lr = 8e-5
 EPOCH = 5
-BATCH_SIZE = 32
-num_layer=2
+BATCH_SIZE = 16
+num_layer=5
 metric_learning = False
 beta = .3
 

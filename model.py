@@ -11,9 +11,57 @@ import torch
 import math 
 
 
+class att_flow_layer(nn.Module):
+    """
+    :param c: (batch, c_len, hidden_size)
+    :param q: (batch, q_len, hidden_size)
+    :return: (batch, c_len, q_len)
+    """
+    def __init__(self,):
+        super(att_flow_layer, self).__init__()
+        self.att_weight_c = nn.Linear(768, 1)
+        self.att_weight_q = nn.Linear(768, 1)
+        self.att_weight_cq = nn.Linear(768, 1)
+
+    def forward(self, c, q, c_mask=None, q_mask=None):
+        c_len = c.size(1)
+        q_len = q.size(1)
+
+        c_mask = c_mask.unsqueeze(2)
+        q_mask = q_mask.unsqueeze(1)
+
+        cq = []
+        for i in range(q_len):
+            #(batch, 1, hidden_size * 2)
+            qi = q.select(1, i).unsqueeze(1)
+            #(batch, c_len, 1)
+            ci = self.att_weight_cq(c * qi).squeeze()
+            cq.append(ci)
+        # (batch, c_len, q_len)
+        cq = torch.stack(cq, dim=-1)
+        # (batch, c_len, q_len)
+        s = self.att_weight_c(c).expand(-1, -1, q_len) + \
+            self.att_weight_q(q).permute(0, 2, 1).expand(-1, c_len, -1) + \
+            cq
+        # (batch, c_len, q_len)
+        a = F.softmax(mask_logits(s, q_mask), dim=2)
+        # (batch, c_len, q_len) * (batch, q_len, hidden_size * 2) -> (batch, c_len, hidden_size * 2)
+        c2q_att = torch.bmm(a, q)
+        # (batch, 1, c_len)
+        b = F.softmax(torch.max(mask_logits(s, c_mask), dim=2)[0], dim=1).unsqueeze(1)
+        # (batch, 1, c_len) * (batch, c_len, hidden_size * 2) -> (batch, hidden_size * 2)
+        q2c_att = torch.bmm(b, c).squeeze()
+        # (batch, c_len, hidden_size * 2) (tiled)
+        q2c_att = q2c_att.unsqueeze(1).expand(-1, c_len, -1)
+        # q2c_att = torch.stack([q2c_att] * c_len, dim=1)
+        # (batch, c_len, hidden_size * 8)
+        x = torch.cat([c, c2q_att, c * c2q_att, c * q2c_att], dim=-1)
+        return x
+
 
 def mask_logits(target, mask):
     return target * mask + (1-mask) * (-1e30)
+
 
 class MultiheadAttention(nn.Module):
     def __init__(self, d_model, n_head, dropout):
@@ -178,9 +226,10 @@ class QA_Model(pl.LightningModule):
                 attention_mask=flat_cho_mask,
             ).last_hidden_state
 
-            doc_hidden = doc_hidden.view(batch_size, 3, input_ids.size(-1), self.d_model)
-            cho_hidden = cho_hidden.view(batch_size, 3, -1, self.d_model)
-            query_hidden = query_hidden.view(batch_size, q_input_ids.size(-1), self.d_model)
+            d_len, q_len, c_len = input_ids.size(-1), q_input_ids.size(-1), cho_input_ids.size(-1)
+            doc_hidden = doc_hidden.view(batch_size, 3, d_len, self.d_model)
+            cho_hidden = cho_hidden.view(batch_size, 3, c_len, self.d_model)
+            query_hidden = query_hidden.view(batch_size, q_len, self.d_model)
 
             cho_hidden = [ele.squeeze(1) for ele in torch.split(cho_hidden, 1, dim=1)]
             frag_hidden = [ele.squeeze(1) for ele in torch.split(doc_hidden, 1, dim=1)]
@@ -199,14 +248,14 @@ class QA_Model(pl.LightningModule):
             # answer_hidden  = self.layer_norm2(answer_hidden)  
             answer_hidden = answer_hidden.view(3*batch_size, -1, 768)
             
-            if False:
+            if True:
                 output = self.fragment_summary(answer_hidden).view(batch_size, 3, 768)
             else:
                 output, _ = self.lstm(answer_hidden)
                 output = output[:,-1,:]
                 output = output.view(batch_size, -1, self.d_proj)
 
-            output, _ = self.bi_lstm(output)
+            # output, _ = self.bi_lstm(output)
             output = self.layer_norm4(output)
             answer_hidden = output.view(batch_size, -1, self.d_proj)
             qa_logits = self.logit_proj(answer_hidden)#.squeeze(2)
