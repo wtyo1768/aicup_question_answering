@@ -1,4 +1,3 @@
-from torch.nn.init import kaiming_normal_
 from transformers.modeling_utils import SequenceSummary
 from pytorch_lightning.metrics import functional as FM
 from transformers import AutoModel, AutoConfig
@@ -8,7 +7,12 @@ import pytorch_lightning as pl
 import torchmetrics
 from torch import nn
 import torch
-import math 
+import torch
+from local_attention import LocalAttention
+
+
+def mask_logits(target, mask):
+    return target * mask + (1-mask) * (-1e30)
 
 
 class att_flow_layer(nn.Module):
@@ -59,50 +63,6 @@ class att_flow_layer(nn.Module):
         return x
 
 
-def mask_logits(target, mask):
-    return target * mask + (1-mask) * (-1e30)
-
-
-class MultiheadAttention(nn.Module):
-    def __init__(self, d_model, n_head, dropout):
-        super(MultiheadAttention, self).__init__()
-        self.d_model = d_model
-
-        self.Wq = nn.Linear(d_model, d_model)
-        self.Wk = nn.Linear(d_model, d_model)
-        self.Wv = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(dropout)
-        self.n_head = n_head
-
-        self.d_k = d_model // n_head
-        self.a = 1 / math.sqrt(self.d_k)
-        self.fc = nn.Linear(d_model, d_model)
-
-
-    def forward(self, query, context, q_mask=None, c_mask=None):
-        bs, q_len, _ = query.size()
-        c_len = context.size(-2)
-        n_head, d_k = self.n_head, self.d_k
-
-        q = self.Wq(query).view(bs, q_len, n_head, d_k)
-        k = self.Wk(context).view(bs, c_len, n_head, d_k)
-        v = self.Wv(context).view(bs, c_len, n_head, d_k)
-
-        q = q.permute(2, 0, 1, 3).contiguous().view(bs*n_head, q_len, d_k)
-        k = k.permute(2, 0, 1, 3).contiguous().view(bs*n_head, c_len, d_k)
-        v = v.permute(2, 0, 1, 3).contiguous().view(bs*n_head, c_len, d_k)
-
-        c_mask = c_mask.unsqueeze(1).repeat(n_head, 1, 1)
-        s = torch.bmm(q, k.transpose(1, 2)) * self.a
-        s = mask_logits(s, c_mask)
-        s = F.softmax(s, dim=2)
-        s = self.dropout(s)
-        out = torch.bmm(s, v)
-        out = out.view(n_head, bs, q_len, d_k).permute(1,2,0,3).contiguous().view(bs, q_len, self.d_model)
-        out = self.fc(out)
-        return self.dropout(out)
-       
-
 class cosine_sim(nn.Module):
     def __init__(self, config=None):
         super(cosine_sim, self).__init__()
@@ -118,6 +78,29 @@ class cosine_sim(nn.Module):
         cos_sim = torch.matmul(torch.div(vec1, norm1+1e-6), torch.div(vec2, norm2+1e-6))
         return cos_sim
 
+
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_ch, out_ch, k, dim=1, bias=True):
+        super().__init__()
+        if dim == 1:
+            self.depthwise_conv = nn.Conv1d(in_channels=in_ch, out_channels=in_ch, kernel_size=k, groups=in_ch,
+                                            padding=k // 2, bias=bias)
+            self.pointwise_conv = nn.Conv1d(in_channels=in_ch, out_channels=out_ch, kernel_size=1, padding=0, bias=bias)
+        elif dim == 2:
+            self.depthwise_conv = nn.Conv2d(in_channels=in_ch, out_channels=in_ch, kernel_size=k, groups=in_ch,
+                                            padding=k // 2, bias=bias)
+            self.pointwise_conv = nn.Conv2d(in_channels=in_ch, out_channels=out_ch, kernel_size=1, padding=0, bias=bias)
+        else:
+            raise Exception("Wrong dimension for Depthwise Separable Convolution!")
+        nn.init.kaiming_normal_(self.depthwise_conv.weight)
+        nn.init.constant_(self.depthwise_conv.bias, 0.0)
+        nn.init.kaiming_normal_(self.depthwise_conv.weight)
+        nn.init.constant_(self.pointwise_conv.bias, 0.0)
+
+    def forward(self, x):
+        return self.pointwise_conv(self.depthwise_conv(x))
+
+
     
 class QA_Model(pl.LightningModule):
     def __init__(self, model_name=None, lr=1e-4, num_layer=10, cls_weight=None, metric_learning=False, beta=.01):
@@ -126,7 +109,7 @@ class QA_Model(pl.LightningModule):
         self.acc = torchmetrics.Accuracy()
         self.f1 = torchmetrics.F1(num_classes=3, average='macro')
         self.beta = beta
-        self.lr = lr
+        self.lr = lr 
         
         config = AutoConfig.from_pretrained(
             model_name,
@@ -136,27 +119,31 @@ class QA_Model(pl.LightningModule):
             model_name,
             config=config,
         )
+        
         # setattr(config, 'summary_type', 'mean')
         # setattr(config, 'summary_use_proj', True)
 
-        self.fragment_summary = SequenceSummary(config)
+        
         # self.doc_summary = SequenceSummary(config)
         # self.query_summary = SequenceSummary(config)
         self.d_model = config.d_model
         n_head =2
         self.d_proj = 768
-        dropout = .2
+        dropout = .1
 
-        self.choq_att = MultiheadAttention(768, n_head, dropout=dropout)
-        self.ans_attn = MultiheadAttention(768, n_head, dropout=dropout)
-        
+        self.att_flow = att_flow_layer()
+        self.cq_resizer = DepthwiseSeparableConv(self.d_model * 4, self.d_model, 5)
+        self.ans_attn = nn.MultiheadAttention(768, n_head, dropout=dropout)
+        # self.check_att  = nn.MultiheadAttention(768, n_head, dropout=dropout)
+
         self.layer_norm1 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         self.layer_norm2 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         self.layer_norm3 = nn.LayerNorm(768, eps=config.layer_norm_eps)
         
-        self.lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True, dropout=dropout)
+        self.summary = nn.LSTM(768, self.d_proj, 1, batch_first=True, dropout=dropout)
+        # self.summary = SequenceSummary(config)
         self.bi_lstm = nn.LSTM(768, 384, 1, batch_first=True, bidirectional=True, dropout=dropout)
-        self.q_lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True, dropout=dropout)
+        # self.q_lstm = nn.LSTM(768, self.d_proj, 1, batch_first=True, dropout=dropout)
 
         self.proj =  nn.Sequential(
             nn.Linear(self.d_proj, self.d_proj),
@@ -164,9 +151,8 @@ class QA_Model(pl.LightningModule):
             nn.GELU(),
         )
         self.layer_norm4 = nn.LayerNorm(self.d_proj, eps=config.layer_norm_eps)
-        self.logit_proj = nn.Linear(self.d_proj, 2)
-        self.sigmoid = nn.Sigmoid()
-
+        self.logit_proj = nn.Linear(self.d_proj, 1)
+        
     def forward(
         self,
         input_ids=None,
@@ -180,6 +166,7 @@ class QA_Model(pl.LightningModule):
         cho_attention_mask=None,
         input_mask=None,
         mems=None,
+        perm_mask=None,
         target_mapping=None,
         head_mask=None,
         label=None,
@@ -209,6 +196,7 @@ class QA_Model(pl.LightningModule):
                 token_type_ids=flat_token_type_ids,
                 attention_mask=flat_attention_mask,
                 mems=mems,
+                inputs_embeds=None,
                 use_mems=use_mems,
                 output_attentions=output_attentions, 
                 output_hidden_states=output_hidden_states,
@@ -220,76 +208,86 @@ class QA_Model(pl.LightningModule):
                 token_type_ids=flat_query_typeid,
                 attention_mask=flat_query_mask,
             ).last_hidden_state
-            cho_hidden = self.doc_encoder(
-                flat_cho_ids,
-                token_type_ids=flat_cho_typeid,
-                attention_mask=flat_cho_mask,
-            ).last_hidden_state
-
-            d_len, q_len, c_len = input_ids.size(-1), q_input_ids.size(-1), cho_input_ids.size(-1)
-            doc_hidden = doc_hidden.view(batch_size, 3, d_len, self.d_model)
-            cho_hidden = cho_hidden.view(batch_size, 3, c_len, self.d_model)
-            query_hidden = query_hidden.view(batch_size, q_len, self.d_model)
-
-            cho_hidden = [ele.squeeze(1) for ele in torch.split(cho_hidden, 1, dim=1)]
-            frag_hidden = [ele.squeeze(1) for ele in torch.split(doc_hidden, 1, dim=1)]
-            att_mask = torch.split(attention_mask, 1, dim=1)
-
-            cho_quried_h = [self.ans_attn(cho_hidden[i], frag_hidden[i], None, att_mask[i].squeeze(1)) 
-                            for i in range(3)]
-            # cho_quried_h = [self.layer_norm1(ele)+cho_hidden[i] for i, ele in enumerate(cho_quried_h)]
+            # cho_hidden = self.doc_encoder(
+            #     flat_cho_ids,
+            #     token_type_ids=flat_cho_typeid,
+            #     attention_mask=flat_cho_mask,
+            # ).last_hidden_state
 
 
-            double_quried_h =[self.choq_att(cho_quried_h[i], query_hidden, None, flat_query_mask) 
-                            for i in range(3)] 
-            # double_quried_h = [self.layer_norm2(ele)+cho_quried_h[i] for i, ele in enumerate(cho_quried_h)]
+            doc_hidden = doc_hidden.view(batch_size, 3, input_ids.size(-1), self.d_model)
+            # cho_hidden = cho_hidden.view(batch_size, 3, -1, self.d_model)
+            query_hidden = query_hidden.view(batch_size, 3, q_input_ids.size(-1), self.d_model)
+
+            frag_hidden = torch.split(doc_hidden, 1, dim=1)
+            frag_hidden = [ele.squeeze(1).transpose(0,1) for ele in frag_hidden]
             
-            answer_hidden = torch.stack(double_quried_h, dim=1)
-            # answer_hidden  = self.layer_norm2(answer_hidden)  
-            answer_hidden = answer_hidden.view(3*batch_size, -1, 768)
-            
-            if True:
-                output = self.fragment_summary(answer_hidden).view(batch_size, 3, 768)
-            else:
-                output, _ = self.lstm(answer_hidden)
-                output = output[:,-1,:]
-                output = output.view(batch_size, -1, self.d_proj)
+            frag_mask = flat_attention_mask.view(batch_size, 3, input_ids.size(-1))
+            frag_mask = torch.split(frag_mask, 1, dim=1)
 
-            # output, _ = self.bi_lstm(output)
-            output = self.layer_norm4(output)
-            answer_hidden = output.view(batch_size, -1, self.d_proj)
-            qa_logits = self.logit_proj(answer_hidden)#.squeeze(2)
+
+            q_hidden = [ele.squeeze(1).transpose(0,1) for ele in torch.split(query_hidden, 1, dim=1)]
+            q_mask = [ele.squeeze(1) for ele in torch.split(q_attention_mask, 1, dim=1)]
+            
+            query_aware = [self.ans_attn(q_hidden[i], frag_hidden[i], frag_hidden[i],
+                            key_padding_mask=torch.logical_not(frag_mask[i].squeeze(1)).type(torch.bool)
+             )[0] for i in range(3)]
+            query_aware = torch.stack([ele.transpose(0, 1) for ele in query_aware], dim=1)
+
+            dqc_hidden = [self.att_flow(q_hidden[i].transpose(0,1), frag_hidden[i].transpose(0,1), q_mask[i], frag_mask[i].squeeze(1))
+                          for i in range(3)]
+
+            # print(dqc_hidden[0].shape)
+            dqc_hidden = [self.cq_resizer(ele.transpose(1,2)).transpose(1,2).transpose(0,1) for ele in dqc_hidden]
+            # print(dqc_hidden[0].shape)
+
+            # fused_hidden = torch.cat([])
+
+            # dqc_query = [self.ans_attn(q_hidden[i], dqc_hidden[i], dqc_hidden[i])[0] for i in range(3)]
+
+            answer_hidden = torch.stack(dqc_hidden, dim=2)
+            answer_hidden = torch.cat([answer_hidden, query_aware], dim=1).view(batch_size*3, -1, 768)
+            print(answer_hidden.shape)
+            # answer_hidden = query_aware.view(batch_size*3, -1, 768)
+            # answer_hidden = query_aware.view(batch_size*3, -1, 768)
+            # answer_hidden = torch.cat([answer_hidden, query_hidden.view(batch_size*3, -1, 768)], dim=1)
+
+            output, _ = self.summary(answer_hidden)
+            output = output[:,-1,:]
+            output = output.view(batch_size, -1, self.d_proj)
+
+            bi_output, _ = self.bi_lstm(output)
+            answer_hidden = self.layer_norm3(bi_output) + output
+
+            # answer_hidden = output
+            qa_logits = self.proj(answer_hidden)
+            qa_logits = self.layer_norm4(qa_logits)+ answer_hidden
+            qa_logits = self.logit_proj(qa_logits).squeeze(2)
 
             if self.metric_learning and label is not None:
-                all_label = torch.tensor([0, 0, 0]).repeat(batch_size, 1).type_as(label)
+                hidden = bi_output
+                all_label = torch.tensor([0, 1, 2]).repeat(batch_size, 1).type_as(label)
                 pos_sample = torch.masked_select(all_label, all_label!=label.repeat(1, 3)).view(batch_size, 2)
                 pos_sample = torch.split(pos_sample, 1, dim=1,)
 
                 dummy = pos_sample[0].unsqueeze(2).expand(pos_sample[0].size(0), pos_sample[0].size(1), answer_hidden.size(2))
-                pos_x = torch.gather(answer_hidden, 1, dummy).squeeze(1)
+                pos_x = torch.gather(hidden, 1, dummy).squeeze(1)
                 dummy = pos_sample[1].unsqueeze(2).expand(pos_sample[1].size(0), pos_sample[1].size(1), answer_hidden.size(2))
-                pos_y = torch.gather(answer_hidden, 1, dummy).squeeze(1)
+                pos_y = torch.gather(hidden, 1, dummy).squeeze(1)
 
                 pos_x = F.normalize(pos_x, dim=-1, p=2)
                 pos_y = F.normalize(pos_y, dim=-1, p=2)
                 pos_loss = 1 - (pos_x * pos_y).sum(dim=-1)
                 
                 dummy = label.unsqueeze(2).expand(label.size(0), label.size(1), answer_hidden.size(2))
-                neg_x = torch.gather(answer_hidden, 1, dummy).squeeze(1)
+                neg_x = torch.gather(hidden, 1, dummy).squeeze(1)
                 neg_x = F.normalize(neg_x, dim=-1, p=2)
                 neg_loss = 2 + (neg_x*pos_x).sum(dim=-1) + (neg_x*pos_y).sum(dim=-1)
                 metric_loss = (pos_loss + neg_loss/2).mean() * self.beta
                 # print(qa_logits)
             if label is not None:
-                loss_fct = CrossEntropyLoss(
-                    # weight=torch.tensor([0.33, 0.66]).to(qa_logits)
-                )
-                # qa_logits = qa_logits.view(-1, 1)
-                # loss_fct = nn.BCELoss()
-                # qa_logits = self.sigmoid(qa_logits )
-                # loss_qa = loss_fct(qa_logits.view(-1), label.view(-1).to(qa_logits))
-                    
-                qa_logits = qa_logits.view(-1, 2)
+                loss_fct = CrossEntropyLoss()
+                
                 loss_qa = loss_fct(qa_logits, label.view(-1))
                 total_loss = loss_qa
                 if self.metric_learning:
@@ -310,27 +308,12 @@ class QA_Model(pl.LightningModule):
         return loss
 
 
-    def get_pred(self, logits, return_logits=False):
-        # print(logits.shape)
-        # logits = logits.view(-1, 3)
-        # print(logits)
-        if return_logits:
-            return logits
-        logits = logits.view(-1, 3, 2)
-
-        pred = torch.max(logits, dim=1).indices
-        # print(pred.shape)
-        pred = pred[:, 1]
-        # print(pred.shape)
-        return pred
-
     def validation_step(self, batch, batch_idx):
         loss, qa_logits, risk_logits = self.forward(**batch)
         # print(qa_logits)
-        # print(batch['label'].shape, qa_logits.shape)
-        # label = batch['label'].view(-1)
-        label = torch.max(batch['label'], dim=1).indices
-        pred_qa = self.get_pred(qa_logits)
+
+        label = batch['label'].view(-1)
+        pred_qa = torch.max(qa_logits, dim=1).indices
 
         metrics = {
             'val_loss': loss, 
@@ -345,13 +328,28 @@ class QA_Model(pl.LightningModule):
         batch.pop('label', None)
         return self.forward(**batch,)
 
-    def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.lr)
 
+    def configure_optimizers(self):
+        self.opt = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        lr_schedulers  = {
+            'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.opt, mode='min',
+                factor=0.2, patience=2,
+                min_lr=1e-6, verbose=True
+            ), 
+            'monitor': 'val_loss'
+        }
+        
+        return [self.opt], [lr_schedulers]
+
+    # def configure_optimizers(self):
+    #     return torch.optim.AdamW(self.parameters(), lr=self.lr)
+ 
 
     def optimizer_step(self, epoch_nb, batch_nb, optimizer, optimizer_i, opt_closure,
         on_tpu=False, using_native_amp=False, using_lbfgs=False,
         ):
+        # print(len(self.train_dataloader))
         if self.trainer.global_step < 50:
             lr_scale = min(1., float(self.trainer.global_step + 1) / 50.)
             for pg in optimizer.param_groups:

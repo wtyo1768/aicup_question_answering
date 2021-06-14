@@ -32,7 +32,7 @@ def set_custom_boundaries(doc):
     return doc
 
 
-def json_parser(fname='./data/train_fold1.json'):
+def json_parser(fname='./data/train_fold1.json', return_raw=False):
     with open(fname) as f:
         f = f.read()    
         json_text = json.loads(f)
@@ -58,6 +58,9 @@ def json_parser(fname='./data/train_fold1.json'):
                 'qa':strQ2B(json_text[i]['answer'].strip()),
                 'risk': int(json_text[i]['risk_label']),
             })
+    if return_raw:
+        doc = [d['text'] for d in json_text]
+        return doc, question, choices, ans
     return doc, question, choices, ans
 
 

@@ -1,6 +1,7 @@
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning import loggers as pl_loggers
+from pytorch_lightning.callbacks import LearningRateMonitor
 from transformers import AutoTokenizer
 from loader import QA_Dataset, collate_fn
 from torch.utils.data import DataLoader
@@ -10,18 +11,19 @@ from datetime import datetime
 import torch
 import json
 import os
+import numpy as np
 
 
-lr = 8e-5
-EPOCH = 5
-BATCH_SIZE = 16
+lr = 1e-4
+EPOCH = 8
+BATCH_SIZE = 32
 num_layer=5
-metric_learning = False
+metric_learning = True
 beta = .3
 
 
-NUM_WORKERS = 16
-do_predict = False
+NUM_WORKERS = 4
+do_predict = True
 stride=64
 seq_len=64
 
@@ -49,11 +51,9 @@ for fold in range(5):
     print('training fold', fold, '...')
     train_ds = QA_Dataset(
         tokenizer, train.replace('idx', str(fold)), 
-        stride=stride, max_seq_len=seq_len, upsample=False,
     )
     val_ds =  QA_Dataset(
         tokenizer, val.replace('idx', str(fold)), 
-        stride=stride, max_seq_len=seq_len,    
     )
     # print(train_ds.cls_weight)
     model = QA_Model(config, num_layer=num_layer, lr=lr, metric_learning=metric_learning, beta=beta)
@@ -63,7 +63,9 @@ for fold in range(5):
         log_graph=True,
         default_hp_metric=False,    
     )
-    checkpoint = ModelCheckpoint(monitor='val_acc', mode='max', save_top_k=1, filename='{epoch}-{val_acc:.2f}-{f1:.2f}')
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+
+    checkpoint = ModelCheckpoint(monitor='val_loss', mode='min', save_top_k=1, filename='{epoch}-{val_acc:.2f}-{f1:.2f}')
     trainer = pl.Trainer(
         gpus = 1,
         max_epochs = EPOCH,
@@ -71,13 +73,13 @@ for fold in range(5):
         log_every_n_steps=10, 
         logger=tb_logger,
         callbacks=[EarlyStopping(   
-            monitor='val_loss', min_delta=0.00,
-            patience=5, verbose=False, mode='min'
-        ), checkpoint ],
+            monitor='val_acc', min_delta=0.00,
+            patience=5, verbose=False, mode='max'
+        ), checkpoint, lr_monitor],
         # gradient_clip_val=.15,
         # auto_scale_batch_size='binsearch',
         # fast_dev_run=True,
-        # stochastic_weight_avg=True,
+        #   =True,
     )
     train_loader = DataLoader(
         train_ds, 
@@ -116,11 +118,16 @@ for fold in range(5):
         )
 
         pred = trainer.predict(model, val_loader)
-        pred = model.get_pred(torch.cat(pred, dim=0))
-        # print(pred.shape)
-        # pred = torch.cat(pred, dim=0)
-        # pred = torch.max(pred, dim=1).indices
-        # pred = pred.cpu().numpy()
+
+        pred = torch.cat(pred, dim=0)
+        pred = torch.max(pred, dim=1).indices
+
+        label = [ele['qa'] for ele in val_ds.ans]
+        acc = torch.count_nonzero(torch.tensor(label) == pred.cpu()).to(torch.int) / pred.shape[0]
+        acc = np.round(acc.numpy(), 2)
+        print('acc', acc)
+        pred = pred.cpu().numpy()
+
 
         with open(val.replace('idx', str(fold)), 'r') as f:
             f = f.read()
@@ -132,7 +139,7 @@ for fold in range(5):
 
             json_text[i]['pred'] = chr(pred[i]+65)
 
-        with open(f'./visualize/{fold}{os.path.basename(checkpoint.best_model_path[:-6])}{fold}.json', 'w') as f:
+        with open(f'./visualize/{fold}acc_{acc}_{os.path.basename(checkpoint.best_model_path[:-6])}{fold}.json', 'w') as f:
             json.dump(json_text, f, ensure_ascii=False, indent=4)
 
 
@@ -155,6 +162,8 @@ for fold in range(5):
             collate_fn=collate_fn,
         )
         pred = trainer.predict(model, dev_loader)
-        pred = model.get_pred(torch.cat(pred, dim=0))
-        # print(pred.shape)
-        break
+        pred = torch.cat(pred, dim=0)
+
+        with open(f'./output/pred{fold}.npy', 'wb') as f:
+            print(f'writing pred{fold}.npy...')    
+            np.save(f, pred.cpu().numpy())
