@@ -8,3 +8,8 @@ baseline
 logs
 output
 visualize
+
+.fitlog
+.fitconfig
+logs
+cache

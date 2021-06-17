@@ -56,7 +56,7 @@ def json_parser(fname='./data/train_fold1.json', return_raw=False):
         if has_ans:
             ans.append({
                 'qa':strQ2B(json_text[i]['answer'].strip()),
-                'risk': int(json_text[i]['risk_label']),
+                # 'risk': int(json_text[i]['risk_label']),
             })
     if return_raw:
         doc = [d['text'] for d in json_text]
