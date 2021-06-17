@@ -32,7 +32,7 @@ import  pkuseg
 jieba.load_userdict('./data/dict.txt') 
 bined_query_cho = True
 reverse_BC = True
-_refresh = True
+_refresh = False
 method = 'pkuseg'
 
 if method=='jieba': ws=jieba.lcut
@@ -327,7 +327,7 @@ class QaModel(nn.Module):
         # sequence summary
         self.lstm = LSTM(d_model, hidden_size=d_model//2, num_layers=1,
                          batch_first=True, bidirectional=True, )
-        self.bilstm = LSTM(d_model, hidden_size=d_model//2, num_layers=1,
+        self.bilstm = LSTM(d_model, hidden_size=d_model//2, num_layers=2,
                          batch_first=True, bidirectional=True,
                          )
         
